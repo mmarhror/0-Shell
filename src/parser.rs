@@ -44,6 +44,10 @@ pub fn parse(inp: &str) -> Result<(String, Vec<String>), Error> {
         parts.push(buf);
     }
 
+    if parts.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "Empty input"));
+    }
+
     let cmd = parts.remove(0);
 
     Ok((cmd, parts))
