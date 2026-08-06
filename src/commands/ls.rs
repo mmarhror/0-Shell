@@ -1,20 +1,28 @@
-use std::io::{ Error, ErrorKind };
+use std::io;
 use std::fs;
-use std::os::unix::fs::{ MetadataExt, FileTypeExt, PermissionsExt };
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{ FileTypeExt };
 use std::path::Path;
 use std::ffi::CStr;
 use std::time::SystemTime;
-use std::mem;
 
 use libc;
 use chrono::{ DateTime, Local };
 
 use crate::shell;
+
+const COLOR_DIR: &str = "\x1b[1;34m";
+const COLOR_LINK: &str = "\x1b[1;36m";
+const COLOR_EXEC: &str = "\x1b[1;32m";
+const COLOR_FIFO: &str = "\x1b[33m";
+const COLOR_SOCKET: &str = "\x1b[1;35m";
+
 #[derive(Default)]
 struct Flags {
     all: bool,
     long: bool,
-    flags: bool,
+    class: bool,
 }
 
 impl Flags {
@@ -22,7 +30,7 @@ impl Flags {
         Flags::default()
     }
 
-    fn parse(&mut self, args: &Vec<String>) -> Result<Vec<String>, Error> {
+    fn parse(&mut self, args: &Vec<String>) -> Result<Vec<String>, io::Error> {
         let mut paths: Vec<String> = Vec::new();
 
         for arg in args {
@@ -36,13 +44,13 @@ impl Flags {
                             self.long = true;
                         }
                         'F' => {
-                            self.flags = true;
+                            self.class = true;
                         }
                         _ => {
                             return Err(
                                 shell::format_error(
                                     "ls",
-                                    ErrorKind::InvalidInput,
+                                    io::ErrorKind::InvalidInput,
                                     &format!("invalid option: '-{}'", arg)
                                 )
                             );
@@ -58,64 +66,119 @@ impl Flags {
     }
 }
 
-#[derive(Debug)]
 struct Entry {
-    perms: Option<String>,
-    nlink: Option<u64>,
-    owner: Option<String>,
-    group: Option<String>,
-    size: Option<u64>,
-    modified: Option<String>,
     name: String,
     indicator: Option<char>,
+    color: &'static str,
+    long: Option<LongInfo>,
 }
 
 impl Entry {
-    fn new(path: &Path, flags: &Flags) -> Result<Self, Error> {
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string_lossy().to_string());
+    fn new(path: &Path, name: String, flags: &Flags) -> Result<Self, io::Error> {
+        let sym_meta = fs::symlink_metadata(path)?;
+        let ft = sym_meta.file_type();
+        let mode = sym_meta.permissions().mode();
 
-        let mut ent = Entry {
-            perms: None,
-            nlink: None,
-            owner: None,
-            group: None,
-            size: None,
-            modified: None,
+        let indicator = if flags.class { get_indicator(&ft, mode) } else { None };
+
+        let color = get_color(&ft, mode);
+
+        let long = if flags.long { Some(LongInfo::new(&path, &sym_meta, &ft)?) } else { None };
+
+        Ok(Entry {
             name,
-            indicator: None,
-        };
-
-        let metadata = fs::metadata(path)?;
-
-        if flags.long {
-            let is_dir = metadata.is_dir();
-
-            ent.perms = Some(get_perms(metadata.permissions().mode(), is_dir));
-            ent.nlink = Some(metadata.nlink());
-            ent.owner = Some(get_owner(metadata.uid()));
-            ent.group = Some(get_group(metadata.gid()));
-            ent.size = Some(metadata.len());
-            ent.modified = Some(get_time(metadata.modified()?));
-        }
-
-        if flags.flags {
-            ent.indicator = get_indicator(path)?;
-        }
-
-        Ok(ent)
+            color,
+            indicator,
+            long,
+        })
     }
 
-    fn line(&self, flags: &Flags) {}
+    fn display_line(&self, ws: &Widths) -> String {
+        let long = self.long.as_ref().unwrap();
+        let ind = self.indicator.map_or(String::new(), |c| c.to_string());
+
+        format!(
+            "{} {:>nw$} {:<ow$} {:<gw$} {:>sw$} {} {}{}{}{}{}",
+            long.perms,
+            long.nlink,
+            long.owner,
+            long.group,
+            long.size,
+            long.modified,
+            self.color,
+            self.name,
+            shell::RESET,
+            ind,
+            long.target,
+            nw = ws.nlink,
+            ow = ws.owner,
+            gw = ws.group,
+            sw = ws.size
+        )
+    }
+}
+
+struct LongInfo {
+    blocks: u64,
+    perms: String,
+    nlink: u64,
+    owner: String,
+    group: String,
+    size: u64,
+    modified: String,
+    target: String,
+}
+
+impl LongInfo {
+    fn new(path: &Path, meta: &fs::Metadata, ft: &fs::FileType) -> Result<Self, io::Error> {
+        let mode = meta.permissions().mode();
+        let type_ch = get_type_char(&ft);
+
+        let target = if ft.is_symlink() {
+            fs::read_link(path)
+                .ok()
+                .map(|p| format!(" -> {}", p.to_string_lossy()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        Ok(LongInfo {
+            blocks: meta.blocks(),
+            perms: get_perms(mode, type_ch),
+            nlink: meta.nlink(),
+            owner: get_owner(meta.uid()),
+            group: get_group(meta.gid()),
+            size: meta.len(),
+            modified: get_time(meta.modified()?),
+            target,
+        })
+    }
 }
 
 // ===== Fetch =====
-fn get_perms(mode: u32, is_dir: bool) -> String {
+fn get_type_char(ft: &fs::FileType) -> char {
+    if ft.is_symlink() {
+        'l'
+    } else if ft.is_dir() {
+        'd'
+    } else if ft.is_fifo() {
+        'p'
+    } else if ft.is_socket() {
+        's'
+    } else if ft.is_block_device() {
+        'b'
+    } else if ft.is_char_device() {
+        'c'
+    } else {
+        '-'
+    }
+}
+
+fn get_perms(mode: u32, type_ch: char) -> String {
     let mut perms = String::new();
 
-    perms.push(if is_dir { 'd' } else { '-' });
+    perms.push(type_ch);
 
     perms.push(if (mode & 0o400) != 0 { 'r' } else { '-' });
     perms.push(if (mode & 0o200) != 0 { 'w' } else { '-' });
@@ -143,11 +206,11 @@ fn get_owner(uid: u32) -> String {
     }
 }
 
-fn get_group(uid: u32) -> String {
+fn get_group(gid: u32) -> String {
     unsafe {
-        let gr = libc::getgrgid(uid);
+        let gr = libc::getgrgid(gid);
         if gr.is_null() {
-            return uid.to_string();
+            return gid.to_string();
         }
 
         CStr::from_ptr((*gr).gr_name).to_string_lossy().to_string()
@@ -157,48 +220,93 @@ fn get_group(uid: u32) -> String {
 fn get_time(modified: SystemTime) -> String {
     let date: DateTime<Local> = modified.into();
 
-    date.format("%d %e %H:%M").to_string()
+    date.format("%b %e %H:%M").to_string()
 }
 
-fn get_indicator(path: &Path) -> Result<Option<char>, Error> {
-    let metadata = fs::symlink_metadata(path)?;
-
-    let file_type = metadata.file_type();
-
-    if file_type.is_symlink() {
-        return Ok(Some('@'));
+fn get_color(ft: &fs::FileType, mode: u32) -> &'static str {
+    if ft.is_symlink() {
+        COLOR_LINK
+    } else if ft.is_dir() {
+        COLOR_DIR
+    } else if ft.is_fifo() {
+        COLOR_FIFO
+    } else if ft.is_socket() {
+        COLOR_SOCKET
+    } else if (mode & 0o111) != 0 {
+        COLOR_EXEC
+    } else {
+        ""
     }
+}
 
-    if file_type.is_dir() {
-        return Ok(Some('/'));
+fn get_indicator(ft: &fs::FileType, mode: u32) -> Option<char> {
+    if ft.is_symlink() {
+        Some('@')
+    } else if ft.is_dir() {
+        Some('/')
+    } else if ft.is_fifo() {
+        Some('|')
+    } else if ft.is_socket() {
+        Some('=')
+    } else if ft.is_file() && (mode & 0o111) != 0 {
+        Some('*')
+    } else {
+        None
     }
-
-    if file_type.is_fifo() {
-        return Ok(Some('|'));
-    }
-
-    if file_type.is_socket() {
-        return Ok(Some('='));
-    }
-
-    if file_type.is_file() {
-        let mode = metadata.permissions().mode();
-        if (mode & 0o111) != 0 {
-            return Ok(Some('*'));
-        }
-    }
-
-    Ok(None)
 }
 
 // ===== Format =====
+// Short
+fn print_short(ents: &[Entry]) {
+    if ents.is_empty() {
+        return;
+    }
 
-fn format_short(ents: &[Entry]) {
-    let col_w = get_col_width(ents);
+    let col_w = get_col_width(ents) + 2;
+    let width = get_terminal_width();
 
-    let mut line = String::new();
-    for ent in ents {
-        
+    let cols = (width / col_w).max(1);
+    let rows = ((ents.len() as f64) / (cols as f64)).ceil() as usize;
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let i = row + col * rows;
+
+            if i >= ents.len() {
+                continue;
+            }
+
+            let ind = ents[i].indicator.map_or(String::new(), |c| c.to_string());
+            let display_len =
+                ents[i].name.len() + (if ents[i].indicator.is_some() { 1 } else { 0 });
+
+            let padding = col_w - display_len;
+
+            if col == cols - 1 {
+                print!("{}{}{}{}", ents[i].color, ents[i].name, shell::RESET, ind);
+            } else {
+                print!(
+                    "{}{}{}{}{}",
+                    ents[i].color,
+                    ents[i].name,
+                    shell::RESET,
+                    ind,
+                    " ".repeat(padding)
+                );
+            }
+        }
+        println!();
+    }
+}
+
+fn get_terminal_width() -> usize {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
+            ws.ws_col as usize
+        } else {
+            80
+        }
     }
 }
 
@@ -206,44 +314,168 @@ fn get_col_width(ents: &[Entry]) -> usize {
     let mut max = 0;
     for ent in ents {
         let w = ent.name.len() + (if ent.indicator.is_some() { 1 } else { 0 });
-        if w > max {
-            max = ent.name.len();
-        }
+        max = w.max(max);
     }
+
     max
 }
 
-fn get_terminal_width() -> usize {
-    unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        libc::ioctl(1, libc::TIOCGWINSZ, &mut ws);
-        ws.ws_col as usize
+// Long
+struct Widths {
+    nlink: usize,
+    owner: usize,
+    group: usize,
+    size: usize,
+}
+
+fn print_long(ents: &[Entry]) {
+    let widths = get_widths(ents);
+
+    for ent in ents {
+        println!("{}", ent.display_line(&widths));
     }
 }
 
-pub fn run(args: Vec<String>) -> Result<(), Error> {
+fn get_widths(ents: &[Entry]) -> Widths {
+    let mut w = Widths {
+        nlink: 0,
+        owner: 0,
+        group: 0,
+        size: 0,
+    };
+
+    for ent in ents {
+        if let Some(ref long) = ent.long {
+            w.nlink = w.nlink.max(long.nlink.to_string().len());
+            w.owner = w.owner.max(long.owner.len());
+            w.group = w.group.max(long.group.len());
+            w.size = w.size.max(long.size.to_string().len());
+        }
+    }
+
+    w
+}
+
+// ===== Run =====
+
+fn print_entries(ents: &[Entry], flags: &Flags, show_total: bool) {
+    if ents.is_empty() {
+        return;
+    }
+
+    if flags.long {
+        if show_total {
+            let blocks: u64 = ents
+                .iter()
+                .map(|e| e.long.as_ref().unwrap().blocks)
+                .sum();
+            println!("total {}", blocks / 2);
+        }
+        print_long(ents);
+    } else {
+        print_short(ents);
+    }
+}
+
+fn print_dirs(name: &str, dirs: &[Entry], flags: &Flags, show_header: bool) {
+    if show_header {
+        println!("{}:", name);
+    }
+    print_entries(dirs, flags, true);
+}
+
+fn print_files(files: &[Entry], flags: &Flags) {
+    print_entries(files, flags, false);
+}
+
+pub fn run(args: Vec<String>) -> Result<(), io::Error> {
+    // Init & Parse flags
     let mut flags = Flags::new();
     let paths = flags.parse(&args)?;
 
     let targets = if paths.is_empty() { vec![String::from(".")] } else { paths };
 
-    let mut ents: Vec<Entry> = Vec::new();
+    let mut files: Vec<Entry> = Vec::new();
+    let mut dirs: Vec<(String, Vec<Entry>)> = Vec::new();
 
     for target in targets {
         let path = Path::new(&target);
 
         if path.is_dir() {
-            for file in fs::read_dir(path)? {
-                ents.push(Entry::new(&file?.path(), &flags)?);
-            }
+            let mut ents = collect_dir(path, target.clone(), &flags)?;
+            ents.sort_by(|a, b| a.name.cmp(&b.name));
+            dirs.push((target, ents));
         } else {
-            ents.push(Entry::new(&path, &flags)?);
+            files.push(collect_file(path, target.clone(), &flags)?);
         }
     }
 
-    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    let show_header = dirs.len() > 1 || (!files.is_empty() && !dirs.is_empty());
+    let mut printed = false;
 
+    if !files.is_empty() {
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        print_files(&files, &flags);
+        printed = true;
+    }
 
+    for (name, dir) in dirs {
+        if printed {
+            println!();
+        }
+
+        print_dirs(&name, &dir, &flags, show_header);
+        printed = true;
+    }
 
     Ok(())
+}
+
+fn collect_file(path: &Path, name: String, flags: &Flags) -> Result<Entry, io::Error> {
+    Entry::new(path, name.clone(), flags).map_err(|e| {
+        let msg = match e.kind() {
+            io::ErrorKind::NotFound => format!("{}: No such file or directory", name),
+
+            io::ErrorKind::PermissionDenied => format!("{}: Permission denied", name),
+
+            _ => format!("{}: {}", name, e),
+        };
+        shell::format_error("ls", e.kind(), &msg)
+    })
+}
+
+fn collect_dir(path: &Path, name: String, flags: &Flags) -> Result<Vec<Entry>, io::Error> {
+    let mut ents: Vec<Entry> = Vec::new();
+
+    if flags.all {
+        ents.push(collect_file(path.join(".").as_path(), ".".to_string(), flags)?);
+        ents.push(collect_file(path.join("..").as_path(), "..".to_string(), flags)?);
+    }
+
+    let entries = fs::read_dir(path).map_err(|e| {
+        let msg = match e.kind() {
+            io::ErrorKind::NotFound => format!("{}: No such file or directory", name),
+
+            io::ErrorKind::PermissionDenied => format!("{}: Permission denied", name),
+
+            _ => format!("{}: {}", name, e),
+        };
+        shell::format_error("ls", e.kind(), &msg)
+    })?;
+
+    for dir_entry in entries {
+        let dir_entry = dir_entry.map_err(|e| {
+            shell::format_error("ls", e.kind(), &format!("{}: {}", name, e))
+        })?;
+
+        let name = dir_entry.file_name().to_string_lossy().to_string();
+
+        if !flags.all && name.starts_with('.') {
+            continue;
+        }
+
+        ents.push(collect_file(&dir_entry.path(), name, flags)?);
+    }
+
+    Ok(ents)
 }
