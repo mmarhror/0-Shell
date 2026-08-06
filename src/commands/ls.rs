@@ -95,7 +95,12 @@ impl Entry {
 
     fn display_line(&self, ws: &Widths) -> String {
         let long = self.long.as_ref().unwrap();
-        let ind = self.indicator.map_or(String::new(), |c| c.to_string());
+
+        let ind = if long.target.is_empty() {
+            self.indicator.map_or(String::new(), |c| c.to_string())
+        } else {
+            String::new()
+        };
 
         format!(
             "{} {:>nw$} {:<ow$} {:<gw$} {:>sw$} {} {}{}{}{}{}",
@@ -360,6 +365,9 @@ fn get_widths(ents: &[Entry]) -> Widths {
 
 fn print_entries(ents: &[Entry], flags: &Flags, show_total: bool) {
     if ents.is_empty() {
+        if flags.long && show_total {
+            println!("total 0");
+        }
         return;
     }
 
@@ -395,6 +403,7 @@ pub fn run(args: Vec<String>) -> Result<(), io::Error> {
 
     let targets = if paths.is_empty() { vec![String::from(".")] } else { paths };
 
+    // Collect Entries
     let mut files: Vec<Entry> = Vec::new();
     let mut dirs: Vec<(String, Vec<Entry>)> = Vec::new();
 
@@ -402,14 +411,26 @@ pub fn run(args: Vec<String>) -> Result<(), io::Error> {
         let path = Path::new(&target);
 
         if path.is_dir() {
-            let mut ents = collect_dir(path, target.clone(), &flags)?;
-            ents.sort_by(|a, b| a.name.cmp(&b.name));
-            dirs.push((target, ents));
+            match collect_dir(path, target.clone(), &flags) {
+                Ok(mut ents) => {
+                    ents.sort_by(|a, b| a.name.cmp(&b.name));
+                    dirs.push((target, ents));
+                }
+                Err(e) => {
+                    shell::display_error(&e.to_string());
+                }
+            }
         } else {
-            files.push(collect_file(path, target.clone(), &flags)?);
+            match collect_file(path, target.clone(), &flags) {
+                Ok(ent) => files.push(ent),
+                Err(e) => {
+                    shell::display_error(&e.to_string());
+                }
+            }
         }
     }
 
+    // List
     let show_header = dirs.len() > 1 || (!files.is_empty() && !dirs.is_empty());
     let mut printed = false;
 
