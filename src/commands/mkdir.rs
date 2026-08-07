@@ -1,27 +1,22 @@
-use std::io::{ Error, ErrorKind };
-use std::fs::create_dir;
+use std::fs;
 
-use crate::shell;
+use crate::error::{ ShellError, CommandError };
 
-pub fn run(args: Vec<String>) -> Result<(), Error> {
+pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(shell::format_error("mkdir", ErrorKind::InvalidInput, "Missing operand"));
+        return Err(ShellError::one("mkdir", "Missing operand"));
     }
 
+    let mut errors: Vec<CommandError> = Vec::new();
+
     for path in args {
-        if let Err(e) = create_dir(&path) {
-            let msg = match e.kind() {
-                ErrorKind::AlreadyExists => format!("{}: File exists", path),
+        if let Err(e) = fs::create_dir(&path) {
+            errors.push(CommandError::new_io("mkdir", &path, &e));
+        };
+    }
 
-                ErrorKind::NotFound => format!("{}: No such file or directory", path),
-
-                ErrorKind::PermissionDenied => format!("{}: Permission denied", path),
-
-                _ => format!("{}: {}", path, e),
-            };
-
-            return Err(shell::format_error("mkdir", e.kind(), &msg));
-        }
+    if !errors.is_empty() {
+        return Err(ShellError::Many(errors));
     }
 
     Ok(())

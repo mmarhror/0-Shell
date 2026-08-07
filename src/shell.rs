@@ -1,4 +1,4 @@
-use std::io::{ Stdin, Stdout, Error, ErrorKind, Write };
+use std::io::{ Stdin, Stdout, Error, Write };
 use std::env;
 
 use crate::parser;
@@ -6,20 +6,11 @@ use crate::commands;
 
 const CLEAR_ALL: &str = "\x1b[2J\x1b[3J\x1b[H";
 
-const WHITE: &str = "\x1b[38;2;171;178;191m";
 const BLUE: &str = "\x1b[38;2;97;175;239m";
 const GREEN: &str = "\x1b[32m";
 
 pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
-
-pub fn format_error(cmd: &str, kind: ErrorKind, msg: &str) -> Error {
-    Error::new(kind, format!("{}: {}", cmd, msg))
-}
-
-pub fn display_error(msg: &str) {
-    eprintln!("{BOLD}{WHITE}osh{RESET} {BOLD}{GREEN}➜{RESET} {msg}");
-}
 
 pub fn reset(out: &mut Stdout) -> Result<(), Error> {
     print!("{CLEAR_ALL}");
@@ -45,7 +36,7 @@ pub fn run(inp: &mut Stdin, out: &mut Stdout) -> Result<(), Error> {
         let (cmd, args) = match parser::parse(&input) {
             Ok(parts) => parts,
             Err(e) => {
-                display_error(&e.to_string());
+                eprintln!("{}", e);
                 continue;
             }
         };
@@ -55,7 +46,7 @@ pub fn run(inp: &mut Stdin, out: &mut Stdout) -> Result<(), Error> {
         }
 
         if let Err(e) = commands::exec(&cmd, args) {
-            display_error(&e.to_string());
+            eprintln!("{}", e);
         }
     }
 

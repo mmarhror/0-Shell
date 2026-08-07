@@ -1,7 +1,11 @@
-use std::io::Error;
 use std::env;
 
-pub fn run() -> Result<(), Error> {
-    println!("{}", env::current_dir()?.display());
+use crate::error::ShellError;
+
+pub fn run() -> Result<(), ShellError> {
+    let cwd = env::current_dir().map_err(|e| ShellError::one("pwd", &e.to_string()))?;
+
+    println!("{}", cwd.display());
+
     Ok(())
 }

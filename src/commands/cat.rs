@@ -1,35 +1,36 @@
-use std::io::{ self, Error, ErrorKind, Write };
 use std::fs;
+use std::io::{ self, Write };
 
-use crate::shell;
+use crate::error::{ CommandError, ShellError };
 
-pub fn run(args: Vec<String>) -> Result<(), Error> {
+pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(shell::format_error("cat", ErrorKind::InvalidInput, "Missing operand"));
+        return Err(ShellError::one("cat", "Missing operand"));
     }
 
     let mut out = io::stdout();
+    let mut errors: Vec<CommandError> = Vec::new();
 
     for path in args {
         match fs::read(&path) {
             Ok(content) => {
-                out.write_all(&content)?;
-                out.flush()?;
+                if let Err(e) = out.write_all(&content) {
+                    errors.push(CommandError::new_io("cat", &path, &e));
+                    continue;
+                }
+                if let Err(e) = out.flush() {
+                    errors.push(CommandError::new_io("cat", &path, &e));
+                    continue;
+                }
             }
             Err(e) => {
-                let msg = match e.kind() {
-                    ErrorKind::NotFound => format!("{}: No such file or directory", path),
-
-                    ErrorKind::PermissionDenied => format!("{}: Permission denied", path),
-
-                    ErrorKind::IsADirectory => format!("{}: Is a directory", path),
-
-                    _ => format!("{}: {}", path, e),
-                };
-
-                return Err(shell::format_error("cat", e.kind(), &msg));
+                errors.push(CommandError::new_io("cat", &path, &e));
             }
         }
+    }
+
+    if !errors.is_empty() {
+        return Err(ShellError::Many(errors));
     }
 
     Ok(())

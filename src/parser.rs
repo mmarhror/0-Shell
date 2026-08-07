@@ -1,6 +1,6 @@
-use std::io::{ Error, ErrorKind };
+use crate::error::ShellError;
 
-pub fn parse(inp: &str) -> Result<(String, Vec<String>), Error> {
+pub fn parse(inp: &str) -> Result<(String, Vec<String>), ShellError> {
     let mut parts = Vec::new();
     let mut buf = String::new();
     let mut opened: Option<char> = None;
@@ -37,15 +37,11 @@ pub fn parse(inp: &str) -> Result<(String, Vec<String>), Error> {
     }
 
     if opened.is_some() {
-        return Err(Error::new(ErrorKind::InvalidInput, "Unclosed quote"));
+        return Err(ShellError::one("osh", "Unclosed quote"));
     }
 
     if !buf.is_empty() || has_quotes {
         parts.push(buf);
-    }
-
-    if parts.is_empty() {
-        return Err(Error::new(ErrorKind::InvalidInput, "Empty input"));
     }
 
     let cmd = parts.remove(0);

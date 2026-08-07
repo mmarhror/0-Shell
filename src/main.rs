@@ -1,6 +1,7 @@
 mod shell;
 mod parser;
 mod commands;
+mod error;
 
 use std::io;
 use shell::{ BOLD, RESET };

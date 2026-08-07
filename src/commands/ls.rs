@@ -1,8 +1,5 @@
-use std::io;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::fs::{ FileTypeExt };
+use std::os::unix::fs::{ FileTypeExt, PermissionsExt, MetadataExt };
 use std::path::Path;
 use std::ffi::CStr;
 use std::time::SystemTime;
@@ -10,8 +7,9 @@ use std::time::SystemTime;
 use libc;
 use chrono::{ DateTime, Local };
 
-use crate::shell;
+use crate::error::{ ShellError, CommandError };
 
+use crate::shell::RESET;
 const COLOR_DIR: &str = "\x1b[1;34m";
 const COLOR_LINK: &str = "\x1b[1;36m";
 const COLOR_EXEC: &str = "\x1b[1;32m";
@@ -30,7 +28,7 @@ impl Flags {
         Flags::default()
     }
 
-    fn parse(&mut self, args: &Vec<String>) -> Result<Vec<String>, io::Error> {
+    fn parse(&mut self, args: &Vec<String>) -> Result<Vec<String>, ShellError> {
         let mut paths: Vec<String> = Vec::new();
 
         for arg in args {
@@ -48,11 +46,7 @@ impl Flags {
                         }
                         _ => {
                             return Err(
-                                shell::format_error(
-                                    "ls",
-                                    io::ErrorKind::InvalidInput,
-                                    &format!("invalid option: '-{}'", arg)
-                                )
+                                ShellError::one("ls", &format!("invalid option: '-{}'", arg))
                             );
                         }
                     }
@@ -74,8 +68,11 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(path: &Path, name: String, flags: &Flags) -> Result<Self, io::Error> {
-        let sym_meta = fs::symlink_metadata(path)?;
+    fn new(path: &Path, name: String, flags: &Flags) -> Result<Self, CommandError> {
+        let sym_meta = fs
+            ::symlink_metadata(path)
+            .map_err(|e| CommandError::new_io("ls", &name, &e))?;
+
         let ft = sym_meta.file_type();
         let mode = sym_meta.permissions().mode();
 
@@ -112,7 +109,7 @@ impl Entry {
             long.modified,
             self.color,
             self.name,
-            shell::RESET,
+            RESET,
             ind,
             long.target,
             nw = ws.nlink,
@@ -135,7 +132,7 @@ struct LongInfo {
 }
 
 impl LongInfo {
-    fn new(path: &Path, meta: &fs::Metadata, ft: &fs::FileType) -> Result<Self, io::Error> {
+    fn new(path: &Path, meta: &fs::Metadata, ft: &fs::FileType) -> Result<Self, CommandError> {
         let mode = meta.permissions().mode();
         let type_ch = get_type_char(&ft);
 
@@ -155,7 +152,11 @@ impl LongInfo {
             owner: get_owner(meta.uid()),
             group: get_group(meta.gid()),
             size: meta.len(),
-            modified: get_time(meta.modified()?),
+            modified: get_time(
+                meta
+                    .modified()
+                    .map_err(|e| CommandError::new_io("ls", &path.to_string_lossy(), &e))?
+            ),
             target,
         })
     }
@@ -288,16 +289,9 @@ fn print_short(ents: &[Entry]) {
             let padding = col_w - display_len;
 
             if col == cols - 1 {
-                print!("{}{}{}{}", ents[i].color, ents[i].name, shell::RESET, ind);
+                print!("{}{}{}{}", ents[i].color, ents[i].name, RESET, ind);
             } else {
-                print!(
-                    "{}{}{}{}{}",
-                    ents[i].color,
-                    ents[i].name,
-                    shell::RESET,
-                    ind,
-                    " ".repeat(padding)
-                );
+                print!("{}{}{}{}{}", ents[i].color, ents[i].name, RESET, ind, " ".repeat(padding));
             }
         }
         println!();
@@ -396,16 +390,17 @@ fn print_files(files: &[Entry], flags: &Flags) {
     print_entries(files, flags, false);
 }
 
-pub fn run(args: Vec<String>) -> Result<(), io::Error> {
+pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     // Init & Parse flags
     let mut flags = Flags::new();
     let paths = flags.parse(&args)?;
 
     let targets = if paths.is_empty() { vec![String::from(".")] } else { paths };
 
-    // Collect Entries
+    // Collect Entries & Errors
     let mut files: Vec<Entry> = Vec::new();
     let mut dirs: Vec<(String, Vec<Entry>)> = Vec::new();
+    let mut errors: Vec<CommandError> = Vec::new();
 
     for target in targets {
         let path = Path::new(&target);
@@ -416,18 +411,19 @@ pub fn run(args: Vec<String>) -> Result<(), io::Error> {
                     ents.sort_by(|a, b| a.name.cmp(&b.name));
                     dirs.push((target, ents));
                 }
-                Err(e) => {
-                    shell::display_error(&e.to_string());
-                }
+                Err(e) => errors.push(e),
             }
         } else {
             match collect_file(path, target.clone(), &flags) {
                 Ok(ent) => files.push(ent),
-                Err(e) => {
-                    shell::display_error(&e.to_string());
-                }
+                Err(e) => errors.push(e),
             }
         }
+    }
+
+    // Print Errors
+    for err in &errors {
+        eprintln!("{}", err);
     }
 
     // List
@@ -452,20 +448,11 @@ pub fn run(args: Vec<String>) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn collect_file(path: &Path, name: String, flags: &Flags) -> Result<Entry, io::Error> {
-    Entry::new(path, name.clone(), flags).map_err(|e| {
-        let msg = match e.kind() {
-            io::ErrorKind::NotFound => format!("{}: No such file or directory", name),
-
-            io::ErrorKind::PermissionDenied => format!("{}: Permission denied", name),
-
-            _ => format!("{}: {}", name, e),
-        };
-        shell::format_error("ls", e.kind(), &msg)
-    })
+fn collect_file(path: &Path, name: String, flags: &Flags) -> Result<Entry, CommandError> {
+    Entry::new(path, name.clone(), flags)
 }
 
-fn collect_dir(path: &Path, name: String, flags: &Flags) -> Result<Vec<Entry>, io::Error> {
+fn collect_dir(path: &Path, name: String, flags: &Flags) -> Result<Vec<Entry>, CommandError> {
     let mut ents: Vec<Entry> = Vec::new();
 
     if flags.all {
@@ -473,21 +460,10 @@ fn collect_dir(path: &Path, name: String, flags: &Flags) -> Result<Vec<Entry>, i
         ents.push(collect_file(path.join("..").as_path(), "..".to_string(), flags)?);
     }
 
-    let entries = fs::read_dir(path).map_err(|e| {
-        let msg = match e.kind() {
-            io::ErrorKind::NotFound => format!("{}: No such file or directory", name),
-
-            io::ErrorKind::PermissionDenied => format!("{}: Permission denied", name),
-
-            _ => format!("{}: {}", name, e),
-        };
-        shell::format_error("ls", e.kind(), &msg)
-    })?;
+    let entries = fs::read_dir(path).map_err(|e| { CommandError::new_io("ls", &name, &e) })?;
 
     for dir_entry in entries {
-        let dir_entry = dir_entry.map_err(|e| {
-            shell::format_error("ls", e.kind(), &format!("{}: {}", name, e))
-        })?;
+        let dir_entry = dir_entry.map_err(|e| CommandError::new_io("ls", &name, &e))?;
 
         let name = dir_entry.file_name().to_string_lossy().to_string();
 

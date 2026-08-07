@@ -1,10 +1,9 @@
-use std::io::{ Error, ErrorKind };
 use std::fs;
 use std::path::Path;
 
-use crate::shell;
+use crate::error::{ ShellError, CommandError };
 
-fn parse_args(args: &[String]) -> Result<(bool, Vec<String>), Error> {
+fn parse_args(args: &[String]) -> Result<(bool, Vec<String>), ShellError> {
     let mut recursive = false;
     let mut paths: Vec<String> = Vec::new();
 
@@ -16,13 +15,7 @@ fn parse_args(args: &[String]) -> Result<(bool, Vec<String>), Error> {
                         recursive = true;
                     }
                     _ => {
-                        return Err(
-                            shell::format_error(
-                                "rm",
-                                ErrorKind::InvalidInput,
-                                &format!("invalid option: '{}'", arg)
-                            )
-                        );
+                        return Err(ShellError::one("rm", &format!("invalid option: '{}'", arg)));
                     }
                 }
             }
@@ -34,41 +27,35 @@ fn parse_args(args: &[String]) -> Result<(bool, Vec<String>), Error> {
     Ok((recursive, paths))
 }
 
-pub fn run(args: Vec<String>) -> Result<(), Error> {
+pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     let (recursive, paths) = parse_args(&args)?;
 
     if paths.is_empty() {
-        return Err(shell::format_error("rm", ErrorKind::InvalidInput, "Missing operand"));
+        return Err(ShellError::one("rm", "Missing operand"));
     }
+
+    let mut errors: Vec<CommandError> = Vec::new();
 
     for path in &paths {
         let p = Path::new(path);
         if p.is_dir() {
             if recursive {
                 if let Err(e) = fs::remove_dir_all(p) {
-                    handle_error(e, path);
+                    errors.push(CommandError::new_io("rm", &path, &e));
                 }
             } else {
-                handle_error(Error::new(ErrorKind::Other, "is a directory"), path);
+                errors.push(CommandError::new("rm", &format!("{}: Is a directory", path)));
             }
         } else {
             if let Err(e) = fs::remove_file(p) {
-                handle_error(e, path);
+                errors.push(CommandError::new_io("rm", &path, &e));
             }
         }
     }
 
+    if !errors.is_empty() {
+        return Err(ShellError::Many(errors));
+    }
+
     Ok(())
-}
-
-fn handle_error(e: Error, path: &str) {
-    let msg = match e.kind() {
-        ErrorKind::NotFound => format!("{}: No such file or directory", path),
-
-        ErrorKind::PermissionDenied => format!("{}: Permission denied", path),
-
-        _ => format!("'{}' Could not be removed", path),
-    };
-
-    eprintln!("{}", shell::format_error("rm", e.kind(), &msg));
 }

@@ -1,4 +1,4 @@
-use std::io::{ Error, ErrorKind };
+use crate::error::ShellError;
 
 mod echo;
 mod pwd;
@@ -10,29 +10,17 @@ mod mv;
 mod rm;
 mod ls;
 
-pub fn exec(cmd: &str, args: Vec<String>) -> Result<(), Error> {
+pub fn exec(cmd: &str, args: Vec<String>) -> Result<(), ShellError> {
     match cmd {
         "echo" => echo::run(args),
-
-        "pwd" => pwd::run()?,
-
-        "cd" => cd::run(args)?,
-
-        "mkdir" => mkdir::run(args)?,
-
-        "cat" => cat::run(args)?,
-
-        "cp" => cp::run(args)?,
-
-        "mv" => mv::run(args)?,
-
-        "rm" => rm::run(args)?,
-
-        "ls" => ls::run(args)?,
-
-        _ => {
-            return Err(Error::new(ErrorKind::InvalidInput, format!("command not found: {}", cmd)));
-        }
+        "pwd" => pwd::run(),
+        "cd" => cd::run(args),
+        "mkdir" => mkdir::run(args),
+        "cat" => cat::run(args),
+        "cp" => cp::run(args),
+        "mv" => mv::run(args),
+        "rm" => rm::run(args),
+        "ls" => ls::run(args),
+        _ => Err(ShellError::one("osh", &format!("command not found: {}", cmd))),
     }
-    Ok(())
 }
