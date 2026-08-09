@@ -1,5 +1,6 @@
 use crate::error::ShellError;
 
+mod help;
 mod echo;
 mod pwd;
 mod cd;
@@ -12,6 +13,7 @@ mod ls;
 
 pub fn exec(cmd: &str, args: Vec<String>) -> Result<(), ShellError> {
     match cmd {
+        "help" => help::run(),
         "echo" => echo::run(args),
         "pwd" => pwd::run(),
         "cd" => cd::run(args),

@@ -12,6 +12,9 @@ const GREEN: &str = "\x1b[32m";
 pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
 
+use libc::{ tcgetattr, tcsetattr, termios, ECHO, ICANON, TCSANOW, STDIN_FILENO };
+use std::mem;
+
 pub fn reset(out: &mut Stdout) -> Result<(), Error> {
     print!("{CLEAR_ALL}");
     out.flush()
