@@ -13,7 +13,6 @@ fn display_error(msg: &str) {
 }
 
 fn main() {
-    let mut input = io::stdin();
     let mut output = io::stdout();
 
     if let Err(e) = shell::reset(&mut output) {
@@ -21,7 +20,7 @@ fn main() {
         return;
     }
 
-    if let Err(e) = shell::run(&mut input, &mut output) {
+    if let Err(e) = shell::run(&mut output) {
         display_error(&format!("{}", e));
     }
 }
