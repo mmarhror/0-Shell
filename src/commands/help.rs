@@ -1,7 +1,7 @@
 use crate::error::ShellError;
 
 pub fn run() -> Result<(), ShellError> {
-    println!("0-shell - a minimalist Unix-like shell");
+    println!("osh - a minimalist Unix-like shell");
     println!();
     println!("Built-in commands:");
     println!("  echo [args...]          Print arguments to stdout");
