@@ -15,7 +15,7 @@ fn parse_args(args: &[String]) -> Result<(bool, Vec<String>), ShellError> {
                         recursive = true;
                     }
                     _ => {
-                        return Err(ShellError::one("rm", &format!("invalid option: '{}'", arg)));
+                        return Err(ShellError::one("rm", &format!("Invalid option: '{}'", ch)));
                     }
                 }
             }

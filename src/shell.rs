@@ -48,7 +48,6 @@ impl Drop for RawMode {
 }
 
 // ===== Reading =====
-
 fn read_char() -> Option<u8> {
     let mut buf = [0u8; 1];
     let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, 1) };
@@ -127,7 +126,11 @@ fn handle_tab(buf: &mut String, out: &mut Stdout) -> Result<(), Error> {
 }
 
 fn get_last_word(buf: &str) -> &str {
-    buf.split_whitespace().last().unwrap_or("")
+    if buf.ends_with(' ') {
+        "" // User wants to see all files
+    } else {
+        buf.split_whitespace().last().unwrap_or("")
+    }
 }
 
 fn find_matches(prefix: &str) -> Vec<String> {
@@ -212,6 +215,7 @@ pub fn read(out: &mut Stdout) -> Result<Option<String>, Error> {
     Ok(Some(buf))
 }
 
+// ===== Reset =====
 pub fn reset(out: &mut Stdout) -> Result<(), Error> {
     write!(out, "{CLEAR_ALL}")?;
     out.flush()
@@ -234,7 +238,8 @@ pub fn run(out: &mut Stdout) -> Result<(), Error> {
         let (cmd, args) = match parser::parse(&input) {
             Ok(parts) => parts,
             Err(e) => {
-                eprintln!("{}", e);
+                writeln!(out, "{}", e)?;
+                out.flush()?;
                 continue;
             }
         };
@@ -244,7 +249,8 @@ pub fn run(out: &mut Stdout) -> Result<(), Error> {
         }
 
         if let Err(e) = commands::exec(&cmd, args) {
-            eprintln!("{}", e);
+            writeln!(out, "{}", e)?;
+            out.flush()?;
         }
     }
 
@@ -260,7 +266,7 @@ fn display_prompt(out: &mut Stdout) -> Result<(), Error> {
                     let dir = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or("/".to_string());
+                        .unwrap_or_default();
 
                     format!("~/{}", dir)
                 }

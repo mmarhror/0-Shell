@@ -2,6 +2,30 @@
 
 Scan results (critical only). Line numbers refer to the current source. A suggested fix is listed below each flaw.
 
+5. **`ls` mishandles `--` and dash-prefixed operands** — `src/commands/ls.rs:18-42`
+   `Flags::parse` treats every arg starting with `-` as an option and then walks
+   each character in `arg[1..]`. There is no `--` sentinel, so `ls -- .` is
+   rejected as `invalid option: '--'` instead of treating `--` as the end of
+   option parsing. GNU `ls` accepts paths like `-file` and `--` as valid
+   operands when they are meant to be literal names.
+
+   **Fix:** Stop parsing options at `--`, and only treat arguments as flags when
+   they appear before that sentinel. After `--`, collect the remaining arguments as
+   literal paths even if they begin with `-`.
+
+6. **`ls` is missing standard GNU behaviors for directory operands** — `src/commands/ls.rs:25-42, 369-428`
+   The parser accepts only `-a`, `-l`, and `-F`, and there is no support for
+   `-d` (directory itself instead of contents). In real `ls`, `ls -d dir` prints
+   the directory entry itself; this implementation always falls into the
+   `path.is_dir()` branch and calls `collect_dir`, which recurses into the
+   directory contents. It also lacks the usual option family for standard GNU
+   semantics (`-r`, `-R`, etc.).
+
+   **Fix:** Add a `dir_only`/`-d` flag to the parser and change the execution
+   path so a directory operand is treated as a single entry when that flag is set.
+   Also add support for standard flag parsing rather than a minimal hard-coded
+   subset.
+
 1. **`cp file file` destroys data** — `src/commands/cp.rs:61`
    Copying a file onto itself is not guarded. `fs::copy` truncates the destination
    first, so `cp a.txt a.txt` silently empties `a.txt` (verified). GNU cp refuses:

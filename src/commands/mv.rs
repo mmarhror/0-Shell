@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{ Path, PathBuf };
+use std::io::ErrorKind;
 
 use crate::error::{ ShellError, CommandError };
 
@@ -32,8 +33,14 @@ pub fn run(args: Vec<String>) -> Result<(), ShellError> {
             }
         };
 
-        if let Err(e) = fs::rename(src_path, dest_path) {
-            errors.push(CommandError::new_io("mv", &src, &e));
+        if let Err(e) = fs::rename(src_path, &dest_path) {
+            if e.kind() == ErrorKind::CrossesDevices {
+                if let Err(e) = copy_and_delete(src_path, &dest_path) {
+                    errors.push(CommandError::new_io("mv", src, &e));
+                }
+            } else {
+                errors.push(CommandError::new_io("mv", src, &e));
+            }
         }
     }
 
@@ -56,4 +63,33 @@ fn get_dest_path(src: &Path, dest: &Path) -> Result<PathBuf, CommandError> {
     } else {
         Ok(dest.to_path_buf())
     }
+}
+
+fn copy_and_delete(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        copy_dir_recursive(src, dest)?;
+        fs::remove_dir_all(src)?;
+    } else {
+        fs::copy(src, dest)?;
+        fs::remove_file(src)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            fs::copy(&src_path, &dest_path)?;
+        }
+    }
+
+    Ok(())
 }
