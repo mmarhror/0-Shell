@@ -1,4 +1,4 @@
-# 0-shell
+# 0-Shell
 
 A minimalist Unix-like shell written in Rust.
 
