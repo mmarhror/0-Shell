@@ -46,7 +46,7 @@ impl Flags {
                         }
                         _ => {
                             return Err(
-                                ShellError::one("ls", &format!("invalid option: '-{}'", arg))
+                                ShellError::one("ls", &format!("Invalid option: '-{}'", ch))
                             );
                         }
                     }
@@ -93,11 +93,7 @@ impl Entry {
     fn display_line(&self, ws: &Widths) -> String {
         let long = self.long.as_ref().unwrap();
 
-        let ind = if long.target.is_empty() {
-            self.indicator.map_or(String::new(), |c| c.to_string())
-        } else {
-            String::new()
-        };
+        let ind = self.indicator.map_or(String::new(), |c| c.to_string());
 
         format!(
             "{} {:>nw$} {:<ow$} {:<gw$} {:>sw$} {} {}{}{}{}{}",
@@ -184,19 +180,38 @@ fn get_type_char(ft: &fs::FileType) -> char {
 fn get_perms(mode: u32, type_ch: char) -> String {
     let mut perms = String::new();
 
+    let is_setuid = (mode & 0o4000) != 0;
+    let is_setgid = (mode & 0o2000) != 0;
+    let is_sticky = (mode & 0o1000) != 0;
+
     perms.push(type_ch);
 
     perms.push(if (mode & 0o400) != 0 { 'r' } else { '-' });
     perms.push(if (mode & 0o200) != 0 { 'w' } else { '-' });
-    perms.push(if (mode & 0o100) != 0 { 'x' } else { '-' });
+    perms.push(match (is_setuid, (mode & 0o100) != 0) {
+        (true, true) => 's',
+        (true, false) => 'S',
+        (false, true) => 'x',
+        (false, false) => '-',
+    });
 
     perms.push(if (mode & 0o040) != 0 { 'r' } else { '-' });
     perms.push(if (mode & 0o020) != 0 { 'w' } else { '-' });
-    perms.push(if (mode & 0o010) != 0 { 'x' } else { '-' });
+    perms.push(match (is_setgid, (mode & 0o010) != 0) {
+        (true, true) => 's',
+        (true, false) => 'S',
+        (false, true) => 'x',
+        (false, false) => '-',
+    });
 
     perms.push(if (mode & 0o004) != 0 { 'r' } else { '-' });
     perms.push(if (mode & 0o002) != 0 { 'w' } else { '-' });
-    perms.push(if (mode & 0o001) != 0 { 'x' } else { '-' });
+    perms.push(match (is_sticky, (mode & 0o001) != 0) {
+        (true, true) => 't',
+        (true, false) => 'T',
+        (false, true) => 'x',
+        (false, false) => '-',
+    });
 
     perms
 }
@@ -224,9 +239,17 @@ fn get_group(gid: u32) -> String {
 }
 
 fn get_time(modified: SystemTime) -> String {
+    let now = SystemTime::now();
+
+    let six_months = std::time::Duration::from_secs(60 * 60 * 24 * 30 * 6);
+
     let date: DateTime<Local> = modified.into();
 
-    date.format("%b %e %H:%M").to_string()
+    if now.duration_since(modified).unwrap_or_default() > six_months {
+        date.format("%b %e  %Y").to_string()
+    } else {
+        date.format("%b %e %H:%M").to_string()
+    }
 }
 
 fn get_color(ft: &fs::FileType, mode: u32) -> &'static str {
@@ -405,7 +428,15 @@ pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     for target in targets {
         let path = Path::new(&target);
 
-        if path.is_dir() {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                errors.push(CommandError::new_io("ls", &target, &e));
+                continue;
+            }
+        };
+
+        if meta.file_type().is_dir() {
             match collect_dir(path, target.clone(), &flags) {
                 Ok(mut ents) => {
                     ents.sort_by(|a, b| a.name.cmp(&b.name));
