@@ -3,9 +3,11 @@ use std::os::unix::fs::{ FileTypeExt, PermissionsExt, MetadataExt };
 use std::path::Path;
 use std::ffi::CStr;
 use std::time::SystemTime;
+use std::cmp::Ordering;
 
 use libc;
 use chrono::{ DateTime, Local };
+use xattr;
 
 use crate::error::{ ShellError, CommandError };
 
@@ -60,10 +62,10 @@ impl Flags {
     }
 }
 
-struct Entry {
-    name: String,
-    indicator: Option<char>,
-    color: &'static str,
+pub struct Entry {
+    pub name: String,
+    pub indicator: Option<char>,
+    pub color: &'static str,
     long: Option<LongInfo>,
 }
 
@@ -80,7 +82,11 @@ impl Entry {
 
         let color = get_color(&ft, mode);
 
-        let long = if flags.long { Some(LongInfo::new(&path, &sym_meta, &ft)?) } else { None };
+        let long = if flags.long {
+            Some(LongInfo::new(&path, &sym_meta, &ft, flags.class)?)
+        } else {
+            None
+        };
 
         Ok(Entry {
             name,
@@ -92,16 +98,33 @@ impl Entry {
 
     fn display_line(&self, ws: &Widths) -> String {
         let long = self.long.as_ref().unwrap();
-
         let ind = self.indicator.map_or(String::new(), |c| c.to_string());
 
+        let size_str = match &long.size {
+            SizeField::Regular(sz) => format!("{:>sw$}", sz, sw = ws.size),
+            SizeField::Device { major, minor } => {
+                let dev_str = format!(
+                    "{:>mj$}, {:>mn$}",
+                    major,
+                    minor,
+                    mj = ws.major,
+                    mn = ws.minor
+                );
+                format!("{:>sw$}", dev_str, sw = ws.size)
+            }
+        };
+
+        // Only reserve column space for ACL if has_acl is true
+        let acl_str = if ws.has_acl { long.acl.unwrap_or(' ').to_string() } else { String::new() };
+
         format!(
-            "{} {:>nw$} {:<ow$} {:<gw$} {:>sw$} {} {}{}{}{}{}",
+            "{}{} {:>nw$} {:<ow$} {:<gw$} {} {} {}{}{}{}{}",
             long.perms,
+            acl_str,
             long.nlink,
             long.owner,
             long.group,
-            long.size,
+            size_str,
             long.modified,
             self.color,
             self.name,
@@ -110,44 +133,59 @@ impl Entry {
             long.target,
             nw = ws.nlink,
             ow = ws.owner,
-            gw = ws.group,
-            sw = ws.size
+            gw = ws.group
         )
     }
+
+    fn sort_key(&self) -> String {
+        self.name
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    }
+}
+
+enum SizeField {
+    Regular(u64),
+    Device {
+        major: u32,
+        minor: u32,
+    },
 }
 
 struct LongInfo {
     blocks: u64,
     perms: String,
+    acl: Option<char>,
     nlink: u64,
     owner: String,
     group: String,
-    size: u64,
+    size: SizeField,
     modified: String,
     target: String,
 }
 
 impl LongInfo {
-    fn new(path: &Path, meta: &fs::Metadata, ft: &fs::FileType) -> Result<Self, CommandError> {
+    fn new(
+        path: &Path,
+        meta: &fs::Metadata,
+        ft: &fs::FileType,
+        class: bool
+    ) -> Result<Self, CommandError> {
         let mode = meta.permissions().mode();
         let type_ch = get_type_char(&ft);
 
-        let target = if ft.is_symlink() {
-            fs::read_link(path)
-                .ok()
-                .map(|p| format!(" -> {}", p.to_string_lossy()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let target = if ft.is_symlink() { get_target(path, class) } else { String::new() };
 
         Ok(LongInfo {
             blocks: meta.blocks(),
             perms: get_perms(mode, type_ch),
+            acl: get_acl(path),
             nlink: meta.nlink(),
             owner: get_owner(meta.uid()),
             group: get_group(meta.gid()),
-            size: meta.len(),
+            size: get_size(meta, ft),
             modified: get_time(
                 meta
                     .modified()
@@ -216,6 +254,13 @@ fn get_perms(mode: u32, type_ch: char) -> String {
     perms
 }
 
+fn get_acl(path: &Path) -> Option<char> {
+    match xattr::get(path, "system.posix_acl_access") {
+        Ok(Some(data)) if data.len() > 28 => Some('+'),
+        _ => None,
+    }
+}
+
 fn get_owner(uid: u32) -> String {
     unsafe {
         let pw = libc::getpwuid(uid);
@@ -238,14 +283,29 @@ fn get_group(gid: u32) -> String {
     }
 }
 
+fn get_size(meta: &fs::Metadata, ft: &fs::FileType) -> SizeField {
+    if ft.is_block_device() || ft.is_char_device() {
+        let rdev = meta.rdev() as libc::dev_t;
+        let major = libc::major(rdev) as u32;
+        let minor = libc::minor(rdev) as u32;
+        SizeField::Device { major, minor }
+    } else {
+        SizeField::Regular(meta.len())
+    }
+}
+
 fn get_time(modified: SystemTime) -> String {
     let now = SystemTime::now();
-
-    let six_months = std::time::Duration::from_secs(60 * 60 * 24 * 30 * 6);
+    let six_months_secs = 182 * 24 * 60 * 60;
 
     let date: DateTime<Local> = modified.into();
 
-    if now.duration_since(modified).unwrap_or_default() > six_months {
+    let is_old_or_future = match now.duration_since(modified) {
+        Ok(dur) => dur.as_secs() > six_months_secs,
+        Err(_) => true,
+    };
+
+    if is_old_or_future {
         date.format("%b %e  %Y").to_string()
     } else {
         date.format("%b %e %H:%M").to_string()
@@ -269,9 +329,7 @@ fn get_color(ft: &fs::FileType, mode: u32) -> &'static str {
 }
 
 fn get_indicator(ft: &fs::FileType, mode: u32) -> Option<char> {
-    if ft.is_symlink() {
-        Some('@')
-    } else if ft.is_dir() {
+    if ft.is_dir() {
         Some('/')
     } else if ft.is_fifo() {
         Some('|')
@@ -282,6 +340,37 @@ fn get_indicator(ft: &fs::FileType, mode: u32) -> Option<char> {
     } else {
         None
     }
+}
+
+fn get_target(path: &Path, classify: bool) -> String {
+    let link = match fs::read_link(path) {
+        Ok(p) => p,
+        Err(_) => {
+            return String::new();
+        }
+    };
+
+    let ind = if classify {
+        let resolved = if link.is_absolute() {
+            link.clone()
+        } else {
+            path.parent().unwrap_or(Path::new(".")).join(&link)
+        };
+
+        fs::metadata(&resolved)
+            .ok()
+            .and_then(|m| {
+                let ft = m.file_type();
+                let mode = m.permissions().mode();
+                get_indicator(&ft, mode)
+            })
+            .map(|c| c.to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    format!(" -> {}{}", link.to_string_lossy(), ind)
 }
 
 // ===== Format =====
@@ -343,12 +432,6 @@ fn get_col_width(ents: &[Entry]) -> usize {
 }
 
 // Long
-struct Widths {
-    nlink: usize,
-    owner: usize,
-    group: usize,
-    size: usize,
-}
 
 fn print_long(ents: &[Entry]) {
     let widths = get_widths(ents);
@@ -358,21 +441,55 @@ fn print_long(ents: &[Entry]) {
     }
 }
 
+struct Widths {
+    nlink: usize,
+    owner: usize,
+    group: usize,
+    size: usize,
+    major: usize,
+    minor: usize,
+    has_acl: bool,
+}
+
 fn get_widths(ents: &[Entry]) -> Widths {
     let mut w = Widths {
         nlink: 0,
         owner: 0,
         group: 0,
         size: 0,
+        major: 0,
+        minor: 0,
+        has_acl: false,
     };
+
+    let mut has_device = false;
 
     for ent in ents {
         if let Some(ref long) = ent.long {
             w.nlink = w.nlink.max(long.nlink.to_string().len());
             w.owner = w.owner.max(long.owner.len());
             w.group = w.group.max(long.group.len());
-            w.size = w.size.max(long.size.to_string().len());
+
+            if long.acl.is_some() {
+                w.has_acl = true;
+            }
+
+            match &long.size {
+                SizeField::Regular(sz) => {
+                    w.size = w.size.max(sz.to_string().len());
+                }
+                SizeField::Device { major, minor } => {
+                    has_device = true;
+                    w.major = w.major.max(major.to_string().len());
+                    w.minor = w.minor.max(minor.to_string().len());
+                }
+            }
         }
+    }
+
+    if has_device {
+        let dev_column_width = w.major + 2 + w.minor;
+        w.size = w.size.max(dev_column_width);
     }
 
     w
@@ -413,6 +530,22 @@ fn print_files(files: &[Entry], flags: &Flags) {
     print_entries(files, flags, false);
 }
 
+fn case_tie_key(s: &str) -> Vec<(char, u8)> {
+    s.chars()
+        .map(|c| (
+            if c.is_uppercase() { c.to_ascii_lowercase() } else { c },
+            c.is_uppercase() as u8,
+        ))
+        .collect()
+}
+
+fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
+    a.sort_key()
+        .cmp(&b.sort_key())
+        .then_with(|| case_tie_key(&a.name).cmp(&case_tie_key(&b.name)))
+        .then_with(|| a.name.cmp(&b.name))
+}
+
 pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     // Init & Parse flags
     let mut flags = Flags::new();
@@ -439,7 +572,7 @@ pub fn run(args: Vec<String>) -> Result<(), ShellError> {
         if meta.file_type().is_dir() {
             match collect_dir(path, target.clone(), &flags) {
                 Ok(mut ents) => {
-                    ents.sort_by(|a, b| a.name.cmp(&b.name));
+                    ents.sort_by(compare_entries);
                     dirs.push((target, ents));
                 }
                 Err(e) => errors.push(e),
@@ -462,7 +595,7 @@ pub fn run(args: Vec<String>) -> Result<(), ShellError> {
     let mut printed = false;
 
     if !files.is_empty() {
-        files.sort_by(|a, b| a.name.cmp(&b.name));
+        files.sort_by(compare_entries);
         print_files(&files, &flags);
         printed = true;
     }
